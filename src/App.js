@@ -28,8 +28,6 @@ function ItemThumb({ item, size = 40 }) {
 }
 
 async function callClaude(systemPrompt, userContent, maxTokens = 600) {
-  // Calls our own Vercel serverless function (/api/claude) which securely
-  // forwards the request to Anthropic with the API key on the server side.
   const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -40,7 +38,12 @@ async function callClaude(systemPrompt, userContent, maxTokens = 600) {
       messages: [{ role: "user", content: userContent }]
     })
   });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error("API error " + res.status + ": " + err);
+  }
   const data = await res.json();
+  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
   return data.content?.map(b => b.text || "").join("").trim();
 }
 
@@ -383,7 +386,8 @@ export default function App() {
         ],
         200
       );
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      if (!text) throw new Error("Empty response from API");
+const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
       setNewItem(prev => ({ ...prev, name: parsed.name || prev.name, category: parsed.category || prev.category, material: parsed.material || prev.material }));
         } catch (e) {
       alert("Auto-name error: " + (e?.message || JSON.stringify(e)));
