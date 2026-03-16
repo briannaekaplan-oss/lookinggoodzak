@@ -1,9 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { db, storage } from "./firebase";
+import { db } from "./firebase";
 import {
   collection, doc, getDocs, setDoc, deleteDoc, updateDoc, onSnapshot, getDoc
 } from "firebase/firestore";
-import { ref, uploadString, getDownloadURL, deleteObject } from "firebase/storage";
 
 // ─── CONSTANTS ───────────────────────────────────────────────
 // API key is stored securely in Vercel environment variables, not here.
@@ -28,6 +27,8 @@ function ItemThumb({ item, size = 40 }) {
 }
 
 async function callClaude(systemPrompt, userContent, maxTokens = 600) {
+  // Calls our own Vercel serverless function (/api/claude) which securely
+  // forwards the request to Anthropic with the API key on the server side.
   const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -38,26 +39,53 @@ async function callClaude(systemPrompt, userContent, maxTokens = 600) {
       messages: [{ role: "user", content: userContent }]
     })
   });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error("API error " + res.status + ": " + err);
-  }
   const data = await res.json();
-  if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
   return data.content?.map(b => b.text || "").join("").trim();
 }
 
-async function uploadPhoto(dataUrl, path) {
-  const storageRef = ref(storage, path);
-  await uploadString(storageRef, dataUrl, "data_url");
-  return getDownloadURL(storageRef);
+// Photos are stored directly in Firestore as compressed base64 — no Storage needed
+async function compressPhoto(dataUrl) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const maxSize = 600;
+      let { width, height } = img;
+      if (width > maxSize || height > maxSize) {
+        if (width > height) { height = Math.round(height * maxSize / width); width = maxSize; }
+        else { width = Math.round(width * maxSize / height); height = maxSize; }
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", 0.65));
+    };
+    img.src = dataUrl;
+  });
 }
 
 function b64(dataUrl) { return dataUrl.split(",")[1]; }
+
+// Reads and compresses a photo before use — prevents large iPhone photos failing
 function readPhoto(file) {
   return new Promise(resolve => {
     const reader = new FileReader();
-    reader.onload = e => resolve(e.target.result);
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        const maxSize = 1200;
+        let { width, height } = img;
+        if (width > maxSize || height > maxSize) {
+          if (width > height) { height = Math.round(height * maxSize / width); width = maxSize; }
+          else { width = Math.round(width * maxSize / height); height = maxSize; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", 0.8));
+      };
+      img.src = e.target.result;
+    };
     reader.readAsDataURL(file);
   });
 }
@@ -300,7 +328,7 @@ export default function App() {
     const id = Date.now().toString();
     let photoURL = null;
     if (outfitPhoto) {
-      try { photoURL = await uploadPhoto(outfitPhoto, `savedOutfits/${id}.jpg`); } catch {}
+      try { photoURL = await compressPhoto(outfitPhoto); } catch {}
     }
     const outfit = {
       id, name,
@@ -340,7 +368,7 @@ export default function App() {
       );
       const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
       let photoURL = null;
-      try { photoURL = await uploadPhoto(ownOutfitPhoto, `savedOutfits/${id}.jpg`); } catch {}
+      try { photoURL = await compressPhoto(ownOutfitPhoto); } catch {}
       const outfit = {
         id,
         name: `Own choice · ${new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" })}`,
@@ -378,21 +406,35 @@ export default function App() {
     setNamingItem(true);
     setNewItemPhoto(dataUrl);
     try {
+      const mimeMatch = dataUrl.match(/^data:([^;]+);base64,/);
+      let mediaType = mimeMatch ? mimeMatch[1] : "image/jpeg";
+      const supported = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+      if (!supported.includes(mediaType)) mediaType = "image/jpeg";
+
       const text = await callClaude(
-        `You are a wardrobe assistant. Identify this clothing item. Respond ONLY with valid JSON: {"name":"concise name e.g. Navy Wool Blazer","category":"Top|Bottom|Shoes|Outerwear|Accessory|Full outfit","material":"likely material or blank if unsure"}`,
+        `You are a wardrobe assistant. Identify this clothing item. Respond ONLY with valid JSON, no extra text: {"name":"concise name e.g. Navy Wool Blazer","category":"Top|Bottom|Shoes|Outerwear|Accessory|Full outfit","material":"likely material or blank if unsure"}`,
         [
-          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64(dataUrl) } },
-          { type: "text", text: "What clothing item is this?" }
+          { type: "image", source: { type: "base64", media_type: mediaType, data: b64(dataUrl) } },
+          { type: "text", text: "What clothing item is this? Reply with JSON only." }
         ],
         200
       );
-      if (!text) throw new Error("Empty response from API");
-const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
-      setNewItem(prev => ({ ...prev, name: parsed.name || prev.name, category: parsed.category || prev.category, material: parsed.material || prev.material }));
-        } catch (e) {
-      alert("Auto-name error: " + (e?.message || JSON.stringify(e)));
+      const cleaned = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(cleaned);
+      setNewItem(prev => ({
+        ...prev,
+        name: parsed.name || prev.name,
+        category: parsed.category || prev.category,
+        material: parsed.material || prev.material
+      }));
+    } catch (e) {
+      console.error("Auto-name failed:", e);
+      // Show a gentle prompt so user knows to type it manually
+      setNewItem(prev => ({ ...prev, name: prev.name || "" }));
+      alert("Couldn't auto-name this item — just type the name yourself! Everything else still works fine.");
+    } finally {
+      setNamingItem(false);
     }
-    finally { setNamingItem(false); }
   }
 
   async function addItem() {
@@ -401,7 +443,7 @@ const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
     const id = Date.now().toString();
     let photoURL = null;
     if (newItemPhoto) {
-      try { photoURL = await uploadPhoto(newItemPhoto, `wardrobe/${id}.jpg`); } catch {}
+      try { photoURL = await compressPhoto(newItemPhoto); } catch {}
     }
     const item = { id, ...newItem, photoURL, shelved: null, feedbackTags: [], createdAt: Date.now() };
     await setDoc(doc(db, "wardrobe", id), item);
@@ -411,29 +453,12 @@ const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
     setSavingItem(false);
   }
 
-  async function uploadPhoto(dataUrl, path) {
-  // Compress to max 800px and 70% quality before uploading
-  const compressed = await new Promise(resolve => {
-    const img = new Image();
-    img.onload = () => {
-      const maxSize = 800;
-      let { width, height } = img;
-      if (width > maxSize || height > maxSize) {
-        if (width > height) { height = Math.round(height * maxSize / width); width = maxSize; }
-        else { width = Math.round(width * maxSize / height); height = maxSize; }
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
-      resolve(canvas.toDataURL("image/jpeg", 0.7));
-    };
-    img.src = dataUrl;
-  });
-  const storageRef = ref(storage, path);
-  await uploadString(storageRef, compressed, "data_url");
-  return getDownloadURL(storageRef);
-}
+  async function updateItemPhoto(itemId, dataUrl) {
+    let photoURL = null;
+    try { photoURL = await compressPhoto(dataUrl); } catch {}
+    await updateDoc(doc(db, "wardrobe", String(itemId)), { photoURL });
+    if (showItemDetail?.id === itemId) setShowItemDetail(prev => ({ ...prev, photoURL }));
+  }
 
   async function shelfItem(itemId, reason) {
     await updateDoc(doc(db, "wardrobe", String(itemId)), { shelved: reason });
