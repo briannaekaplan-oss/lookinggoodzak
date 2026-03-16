@@ -6,7 +6,7 @@ import {
 import { ref, uploadString, getDownloadURL, deleteObject } from "firebase/storage";
 
 // ─── CONSTANTS ───────────────────────────────────────────────
-const ANTHROPIC_API_KEY = process.env.REACT_APP_ANTHROPIC_API_KEY;
+// API key is stored securely in Vercel environment variables, not here.
 const DEFAULT_VIBES = ["Casual / Errands", "Date Night", "Active / Sporty", "Smart Casual", "Formal / Event"];
 const SHELF_REASONS = ["Too small", "Too big", "Specific occasions only", "Retire / donate", "At dry cleaner"];
 const CATEGORIES = ["Top", "Bottom", "Shoes", "Outerwear", "Accessory", "Full outfit"];
@@ -28,9 +28,11 @@ function ItemThumb({ item, size = 40 }) {
 }
 
 async function callClaude(systemPrompt, userContent, maxTokens = 600) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  // Calls our own Vercel serverless function (/api/claude) which securely
+  // forwards the request to Anthropic with the API key on the server side.
+  const res = await fetch("/api/claude", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
       max_tokens: maxTokens,
