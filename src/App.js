@@ -385,7 +385,9 @@ export default function App() {
       );
       const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
       setNewItem(prev => ({ ...prev, name: parsed.name || prev.name, category: parsed.category || prev.category, material: parsed.material || prev.material }));
-    } catch {}
+        } catch (e) {
+      alert("Auto-name error: " + (e?.message || JSON.stringify(e)));
+    }
     finally { setNamingItem(false); }
   }
 
