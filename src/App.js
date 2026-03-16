@@ -411,12 +411,29 @@ const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
     setSavingItem(false);
   }
 
-  async function updateItemPhoto(itemId, dataUrl) {
-    let photoURL = null;
-    try { photoURL = await uploadPhoto(dataUrl, `wardrobe/${itemId}.jpg`); } catch {}
-    await updateDoc(doc(db, "wardrobe", String(itemId)), { photoURL });
-    if (showItemDetail?.id === itemId) setShowItemDetail(prev => ({ ...prev, photoURL }));
-  }
+  async function uploadPhoto(dataUrl, path) {
+  // Compress to max 800px and 70% quality before uploading
+  const compressed = await new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const maxSize = 800;
+      let { width, height } = img;
+      if (width > maxSize || height > maxSize) {
+        if (width > height) { height = Math.round(height * maxSize / width); width = maxSize; }
+        else { width = Math.round(width * maxSize / height); height = maxSize; }
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", 0.7));
+    };
+    img.src = dataUrl;
+  });
+  const storageRef = ref(storage, path);
+  await uploadString(storageRef, compressed, "data_url");
+  return getDownloadURL(storageRef);
+}
 
   async function shelfItem(itemId, reason) {
     await updateDoc(doc(db, "wardrobe", String(itemId)), { shelved: reason });
